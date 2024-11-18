@@ -4,7 +4,7 @@ import random
 import math
 import json
 import pandas as pd
-from utils import hash_tuple
+from model_utils import hash_tuple
 import numpy as np
 
 import model_utils

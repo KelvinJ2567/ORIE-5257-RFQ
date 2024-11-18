@@ -1,7 +1,7 @@
 import pandas as pd
 import hashlib
 import json
-from utils import hash_tuple
+from model_utils import hash_tuple
 
 
 rfq_training_data = pd.read_excel('./data/rfq.xlsx', sheet_name='InSample')
