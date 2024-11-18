@@ -9,3 +9,5 @@ conda install gtest gmock
 pip install vowpalwabbit
 
 ```
+
+Running `request_for_quote.py` will generate an excel file named `competition.xlsx` which contains quoted price for every entry.

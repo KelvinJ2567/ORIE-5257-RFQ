@@ -5,6 +5,16 @@ import math
 import json
 import pandas as pd
 from utils import hash_tuple
+import numpy as np
+
+import model_utils
+import numpy as np
+
+
+bid_logistic_model = model_utils.load_model('bid_logistic_model.pkl')
+ask_logistic_model = model_utils.load_model('ask_logistic_model.pkl')
+bid_scaler = model_utils.load_model('bid_scaler.pkl')
+ask_scaler = model_utils.load_model('ask_scaler.pkl')
 
 
 # For this contextual bandit problem, we define the following:
@@ -16,7 +26,7 @@ from utils import hash_tuple
 #         - 5Y
 #         - 10Y
 #         - 30Y
-#     - side: str. The side of the quote. It can be either 'bid' or 'ask'
+#     - side: str. The side of the quote. It can be either 'BID' or 'ASk'
 #     - quantity: int. The quantity of the quote
 #     - counterparty: str.
 #         - CountrysideBroker
@@ -64,8 +74,21 @@ def predict_prob(context: dict, quoted_spread: float) -> float:
 
     Returns:
         float. The probability of the quote being accepted
+    
+    Raises:
+        ValueError: If the side is not 'BID' or 'ASK'
     """
-    return random.uniform(0, 1)
+    
+    x_test = np.array([context['quantity']*100, context['mid_price'], context['competitors'], quoted_spread]).reshape(1, -1)
+    x_test = pd.DataFrame(x_test, columns=['Notional', 'MidPrice', 'Competitors', 'spread'])
+    
+    if context['side'] == 'BID':
+        return bid_logistic_model.predict_proba(bid_scaler.transform(x_test))[0][1]
+    
+    elif context['side'] == 'ASK':
+        return ask_logistic_model.predict_proba(ask_scaler.transform(x_test))[0][1]
+    else:
+        raise ValueError('side must be either BID or ASK')
 
 
 def get_cost(
@@ -159,29 +182,88 @@ def train_vw_model(
     return rewards 
 
 
+def predict_vw_model(vw: vowpalwabbit.Workspace, context: dict):
+    quoted_spread, pdf = vw.predict(to_vw_example_format(context))
+    return quoted_spread, pdf
+
+
 
 if __name__ == '__main__':
+    bid_logistic_model = model_utils.load_model('bid_logistic_model.pkl')
+    ask_logistic_model = model_utils.load_model('ask_logistic_model.pkl')
+
     rfq_training_data = pd.read_excel('./data/rfq.xlsx', sheet_name='InSample')
+    
+    rfq_training_bid = rfq_training_data[rfq_training_data['Side'] == 'BID'].copy()
+    rfq_training_ask = rfq_training_data[rfq_training_data['Side'] == 'ASK'].copy()
 
 
     num_actions = 32
     bandwidth = 0.005
 
-    vw = vowpalwabbit.Workspace(
+    vw_bid = vowpalwabbit.Workspace(
     "--cats "
     + str(num_actions)
     + "  --bandwidth "
     + str(bandwidth)
-    + " --min_value -0.2 --max_value 0.2 --json --chain_hash --coin --epsilon 0.2 -q :: --quiet"
+    + " --min_value -0.2 --max_value 0.0 --json --chain_hash --coin --epsilon 0.2 -q :: --quiet"
 )
-
-    rewards = train_vw_model(vw, rfq_training_data, get_cost, -0.2, 0.2, do_learn=True)
-    vw.finish()
+    rewards_bid = train_vw_model(vw_bid, rfq_training_bid, get_cost, -0.2, 0.0, do_learn=True)
+    vw_bid.finish()
 
     # Plot the costs
-    cum_rewards = pd.Series(rewards).cumsum()
-    plt.plot(rewards)
+    cum_rewards_bid = pd.Series(rewards_bid).cumsum()
+    plt.plot(cum_rewards_bid)
     plt.xlabel('Iteration')
     plt.ylabel('Reward')
-    plt.title('Rewards vs Iteration')
+    plt.title('Bid Cumulative Rewards vs Iteration')
     plt.show()
+
+    vw_ask = vowpalwabbit.Workspace(
+    "--cats "
+    + str(num_actions)
+    + "  --bandwidth "
+    + str(bandwidth)
+    + " --min_value 0.0 --max_value 0.2 --json --chain_hash --coin --epsilon 0.2 -q :: --quiet"
+)
+    rewards_ask = train_vw_model(vw_ask, rfq_training_ask, get_cost, 0.0, 0.2, do_learn=True)
+    vw_ask.finish()
+
+    # Plot the costs
+    cum_rewards_ask = pd.Series(rewards_ask).cumsum()
+    plt.plot(cum_rewards_ask)
+    plt.xlabel('Iteration')
+    plt.ylabel('Reward')
+    plt.title('Ask Cumulative Rewards vs Iteration')
+    plt.show()
+
+    # Out of sample test
+
+    rf_oos = pd.read_excel('./data/rfq.xlsx', sheet_name='Competition')
+
+    quoted_prices = []
+    for i, row in rf_oos.iterrows():
+        row['Quantity'] = int(row['Notional'] / 100)
+        context = {
+            'bond': row['Bond'].split(' ')[-1],
+            'side': row['Side'],
+            'quantity': row['Quantity'],
+            'counterparty': row['Counterparty'],
+            'mid_price': row['MidPrice'],
+            'competitors': row['Competitors'],
+        }
+        if row['Side'] == 'BID':
+            quoted_spread, pdf = vw_bid.predict(to_vw_example_format(context))
+        else:
+            quoted_spread, pdf = vw_ask.predict(to_vw_example_format(context))
+
+        print(f'Predicted quoted spread: {quoted_spread}')
+
+        # round to 3 decimal places
+        quoted_price = round(context['mid_price'] + quoted_spread, 3)
+        quoted_prices.append(quoted_price)
+    
+    rf_oos['QuotedPrice'] = None
+    rf_oos['QuotedPrice'] = quoted_prices
+    rf_oos.to_excel('./competition.xlsx', index=False)
+    
